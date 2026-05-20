@@ -5,7 +5,7 @@ Python packaging made human — initialise, build, version, and deploy Python pa
 [![PyPI version](https://badge.fury.io/py/pipndeploy.svg)](https://pypi.org/project/pipndeploy/)
 [![Python versions](https://img.shields.io/pypi/pyversions/pipndeploy.svg)](https://pypi.org/project/pipndeploy/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://img.shields.io/badge/tests-126%20passing-brightgreen)](https://github.com/YOUR_USERNAME/PiPnDeploy)
+[![Tests](https://img.shields.io/badge/tests-159%20passing-brightgreen)](https://github.com/YOUR_USERNAME/PiPnDeploy)
 
 ---
 
@@ -198,7 +198,7 @@ Auto-detected dependencies are a starting point. Review them before publishing.
 ## Development
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/PiPnDeploy
+git clone https://github.com/7h3v01d/PiPnDeploy
 cd PiPnDeploy
 pip install -e ".[gui,dev]"
 python -m pytest tests/ -v

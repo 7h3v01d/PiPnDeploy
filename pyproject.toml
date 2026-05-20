@@ -52,9 +52,9 @@ pipndeploy = "PiPnDeploy.cli_main:app"
 pipndeploy-gui = "PiPnDeploy.gui_main:main"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/PiPnDeploy"
-Repository = "https://github.com/yourusername/PiPnDeploy"
-Issues = "https://github.com/yourusername/PiPnDeploy/issues"
+Homepage = "https://github.com/7h3v01d/PiPnDeploy"
+Repository = "https://github.com/7h3v01d/PiPnDeploy"
+Issues = "https://github.com/7h3v01d/PiPnDeploy/issues"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
