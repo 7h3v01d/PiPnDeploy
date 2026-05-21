@@ -5,7 +5,7 @@ Python packaging made human — initialise, build, version, and deploy Python pa
 [![PyPI version](https://badge.fury.io/py/pipndeploy.svg)](https://pypi.org/project/pipndeploy/)
 [![Python versions](https://img.shields.io/pypi/pyversions/pipndeploy.svg)](https://pypi.org/project/pipndeploy/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://img.shields.io/badge/tests-159%20passing-brightgreen)](https://github.com/YOUR_USERNAME/PiPnDeploy)
+[![Tests](https://img.shields.io/badge/tests-passing-brightgreen)](https://github.com/7h3v01d/PiPnDeploy/actions)
 
 ---
 
@@ -51,8 +51,11 @@ pip install pipndeploy[gui]
 ## CLI usage
 
 ```bash
-# Initialise a new project
+# Initialise packaging metadata for an existing project
 pipndeploy init
+
+# Initialise and also create a minimal package skeleton
+pipndeploy init --create-package
 
 # Check whether a package name is available on PyPI
 pipndeploy name-check my-package
@@ -218,7 +221,12 @@ PiPnDeploy/
 │   └── Utils/
 │       └── __init__.py
 ├── tests/
+│   ├── test_clean_safety.py
 │   ├── test_dep_detection.py
+│   ├── test_entry_point_wrappers.py
+│   ├── test_fixes_5678.py
+│   ├── test_init_scaffold.py
+│   ├── test_items_123.py
 │   ├── test_pyproject_generation.py
 │   └── test_version_bump.py
 ├── hooks/                # Optional lifecycle hooks (user-created)

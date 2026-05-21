@@ -4,7 +4,6 @@
 #   - Logging bridge replaces stdout redirect as primary capture mechanism
 #   - StdoutRedirector kept only as a safety net for any stray print() calls
 
-import configparser
 import logging
 import re
 import sys
@@ -390,13 +389,16 @@ class PipnDeployGUI(QMainWindow):
         self.init_description = QLineEdit()
         self.init_license     = QComboBox()
         self.init_license.addItems(core_logic.LICENSE_OPTIONS)
-        self.init_homepage    = QLineEdit("https://github.com/yourusername/your-package")
+        self.init_homepage    = QLineEdit()
+        self.init_homepage.setPlaceholderText("https://github.com/you/your-package  (optional)")
         self.init_keywords    = QLineEdit()
         self.init_cli_script  = QLineEdit()
         self.init_auto_deps   = QCheckBox("Auto-detect dependencies (AST scan)")
         self.init_auto_deps.setChecked(True)
-        self.init_gen_gitignore = QCheckBox("Generate .gitignore")
+        self.init_gen_gitignore   = QCheckBox("Generate .gitignore")
         self.init_gen_gitignore.setChecked(True)
+        self.init_create_package  = QCheckBox("Create package skeleton  (module/__init__.py + module/main.py)")
+        self.init_create_package.setChecked(False)  # opt-in — safe for existing projects
 
         name_row = QHBoxLayout()
         name_row.addWidget(self.init_name)
@@ -420,8 +422,9 @@ class PipnDeployGUI(QMainWindow):
         self._field(grid, 5, "Homepage URL:",         self.init_homepage)
         self._field(grid, 6, "Keywords (comma-sep):", self.init_keywords)
         self._field(grid, 7, "CLI Script:",           cli_w)
-        grid.addWidget(self.init_auto_deps,     8, 0, 1, 2)
-        grid.addWidget(self.init_gen_gitignore, 9, 0, 1, 2)
+        grid.addWidget(self.init_auto_deps,      8, 0, 1, 2)
+        grid.addWidget(self.init_gen_gitignore,  9, 0, 1, 2)
+        grid.addWidget(self.init_create_package, 10, 0, 1, 2)
 
         lay.addWidget(self.init_box)
 
@@ -516,7 +519,8 @@ class PipnDeployGUI(QMainWindow):
         self.full_email       = QLineEdit()
         self.full_description = QLineEdit()
         self.full_license     = QComboBox(); self.full_license.addItems(core_logic.LICENSE_OPTIONS)
-        self.full_homepage    = QLineEdit("https://github.com/yourusername/your-package")
+        self.full_homepage    = QLineEdit()
+        self.full_homepage.setPlaceholderText("https://github.com/you/your-package  (optional)")
         self.full_keywords    = QLineEdit()
         self.full_cli_script  = QLineEdit()
         self.full_auto_deps   = QCheckBox("Auto-detect dependencies"); self.full_auto_deps.setChecked(True)
@@ -909,7 +913,8 @@ class PipnDeployGUI(QMainWindow):
         log  = logging.getLogger("pipndeploy")
         self._set_status("Initialising…")
 
-        gen_gi = self.init_gen_gitignore.isChecked()
+        gen_gi  = self.init_gen_gitignore.isChecked()
+        gen_pkg = self.init_create_package.isChecked()
 
         def task():
             deps = core_logic.detect_dependencies(root) if auto else []
@@ -918,7 +923,7 @@ class PipnDeployGUI(QMainWindow):
                 author=author, email=email, dependencies=deps,
                 license_text=lic, keywords=kw, homepage=home,
                 cli_script_value=cli, project_root=root,
-                gen_gitignore=gen_gi,
+                gen_gitignore=gen_gi, gen_package=gen_pkg,
             )
 
         def done(_):
@@ -1026,6 +1031,7 @@ class PipnDeployGUI(QMainWindow):
                 author=author, email=email, dependencies=deps,
                 license_text=lic, keywords=kw, homepage=home,
                 cli_script_value=cli, project_root=root,
+                gen_package=False,  # Full pipeline targets existing projects
             )
             log.info("✅ Init complete.")
             # Capture returned interpreter so the deploy step uses the same env.
@@ -1153,8 +1159,12 @@ class PipnDeployGUI(QMainWindow):
         self._run_in_thread(task, on_done=done)
 
     def _generate_pypirc(self) -> None:
-        import os as _os
-        import shutil as _shutil
+        """Delegate .pypirc generation to core_logic.generate_pypirc().
+
+        The GUI handles the overwrite confirmation dialog; the actual file
+        writing, backup, and chmod are done by core_logic so they are
+        testable and available from the CLI too.
+        """
         log            = logging.getLogger("pipndeploy")
         pypi_token     = self.auth_pypi.text().strip()
         testpypi_token = self.auth_testpypi.text().strip()
@@ -1163,9 +1173,10 @@ class PipnDeployGUI(QMainWindow):
             log.error("❌ Enter at least one API token.")
             return
 
-        pypirc = Path.home() / ".pypirc"
+        pypirc   = Path.home() / ".pypirc"
+        overwrite = False
 
-        # Warn before overwriting an existing file
+        # Ask before overwriting — dialog stays in GUI, writing moves to core
         if pypirc.exists():
             answer = QMessageBox.question(
                 self,
@@ -1178,51 +1189,26 @@ class PipnDeployGUI(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 log.info("🔎 .pypirc generation cancelled.")
                 return
-            # Back up the existing file before overwriting
-            backup = pypirc.with_name(".pypirc.bak")
-            _shutil.copy2(pypirc, backup)
-            log.info("🔎 Backed up existing .pypirc → %s", backup)
+            overwrite = True
 
-        # Only list servers that actually have a token configured
-        servers: list[str] = []
-        if pypi_token:
-            servers.append("pypi")
-        if testpypi_token:
-            servers.append("testpypi")
+        def task():
+            return core_logic.generate_pypirc(
+                pypi_token=pypi_token,
+                testpypi_token=testpypi_token,
+                overwrite=overwrite,
+                backup=True,
+            )
 
-        config = configparser.ConfigParser()
-        # Use newline-indented format so index-servers is one entry per line
-        config["distutils"] = {"index-servers": "\n    " + "\n    ".join(servers)}
-
-        if pypi_token:
-            config["pypi"] = {
-                "repository": "https://upload.pypi.org/legacy/",
-                "username":   "__token__",
-                "password":   pypi_token,
-            }
-        if testpypi_token:
-            config["testpypi"] = {
-                "repository": "https://test.pypi.org/legacy/",
-                "username":   "__token__",
-                "password":   testpypi_token,
-            }
-
-        try:
-            with open(pypirc, "w") as fh:
-                config.write(fh)
-
-            # Restrict permissions to owner-only on Unix-like systems
-            if _os.name != "nt":
-                _os.chmod(pypirc, 0o600)
-                log.info("🔎 Set .pypirc permissions to 600 (owner read/write only).")
-
-            log.info("✅ .pypirc generated at %s", pypirc)
-            log.info("⚠️  API tokens are stored in plaintext. Keep this file private.")
+        def done(result):
             self._set_status(".pypirc generated.")
             self.auth_pypi.clear()
             self.auth_testpypi.clear()
-        except Exception as exc:
-            log.error("❌ Failed to write .pypirc: %s", exc)
+
+        def err(msg):
+            log.error("❌ %s", msg)
+            self._set_status("Failed to write .pypirc.")
+
+        self._run_in_thread(task, on_done=done, on_error=err)
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 [project]
 name = "pipndeploy"
-version = "2.3.0"
+version = "2.4.0"
 description = "Python packaging made human — init, build, and deploy from one GUI or CLI."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -55,16 +55,24 @@ def init(
     author: str = typer.Option(..., prompt=True, help="Author name"),
     email: str = typer.Option(..., prompt=True, help="Author email"),
     license_text: str = typer.Option("MIT", help=f"SPDX licence identifier. Options: {', '.join(core_logic.LICENSE_OPTIONS)}"),
-    homepage: str = typer.Option("https://github.com/yourusername/your-package", help="Project homepage URL"),
+    homepage: str = typer.Option("", help="Project homepage URL (optional)"),
     keywords: str = typer.Option("", help="Comma-separated keywords"),
     cli_script: str = typer.Option("", help="CLI entry point, e.g. mypackage.main:main"),
     deps: str = typer.Option("", help="Comma-separated dependencies (ignored when --auto-deps is set)"),
-    auto_deps: bool = typer.Option(False, "--auto-deps", help="Auto-detect dependencies via AST scan"),
-    project_dir: str = typer.Option("", "--project-dir", "-d", help="Project directory (default: cwd)"),
+    auto_deps:      bool = typer.Option(False, "--auto-deps",       help="Auto-detect dependencies via AST scan"),
+    create_package: bool = typer.Option(False, "--create-package",  help="Create a minimal package skeleton (module/__init__.py + module/main.py)"),
+    project_dir:    str  = typer.Option("",    "--project-dir", "-d", help="Project directory (default: cwd)"),
 ) -> None:
-    """🛠  Initialise a new pyproject.toml and README.md."""
-    from pathlib import Path as _Path
-    root = _Path(project_dir).resolve() if project_dir else _cwd()
+    """🛠  Initialise a new pyproject.toml and README.md.
+
+    Use --create-package to also scaffold a minimal package folder when
+    starting a brand-new project. Safe to omit for existing projects.
+    """
+    try:
+        root = core_logic.resolve_project_root(project_dir)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(1)
 
     if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
         typer.secho("❌ Invalid email format.", fg=typer.colors.RED)
@@ -111,6 +119,7 @@ def init(
             # make_default_entry_point(name) so hyphens become underscores.
             cli_script_value=cli_script,
             project_root=root,
+            gen_package=create_package,
         )
     except ValueError as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
@@ -123,8 +132,11 @@ def build(
     project_dir: str = typer.Option("", "--project-dir", "-d", help="Project directory (default: cwd)"),
 ) -> None:
     """📦 Build wheel + sdist (runs pre_build hook if present)."""
-    from pathlib import Path as _Path
-    root = _Path(project_dir).resolve() if project_dir else _cwd()
+    try:
+        root = core_logic.resolve_project_root(project_dir)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(1)
     venv = root / ".venv"
     if use_venv and not venv.exists():
         typer.secho("⚠️  No .venv found — run 'pipndeploy create-venv' first.", fg=typer.colors.YELLOW)
@@ -140,15 +152,44 @@ def build(
 
 @app.command()
 def deploy(
-    testpypi:    bool = typer.Option(False, "--test", "-t", help="Upload to TestPyPI"),
-    dry_run:     bool = typer.Option(False, "--dry-run",    help="Simulate upload only"),
-    project_dir: str  = typer.Option("", "--project-dir", "-d", help="Project directory (default: cwd)"),
+    testpypi:    bool = typer.Option(False, "--test", "-t",   help="Upload to TestPyPI"),
+    dry_run:     bool = typer.Option(False, "--dry-run",       help="Simulate upload only"),
+    use_venv:    bool = typer.Option(False, "--venv",          help="Use the project .venv interpreter for twine"),
+    python_path: str  = typer.Option("",   "--python",        help="Explicit interpreter path for twine (e.g. .venv/Scripts/python.exe)"),
+    project_dir: str  = typer.Option("",   "--project-dir", "-d", help="Project directory (default: cwd)"),
 ) -> None:
-    """🚀 Upload dist/* to PyPI or TestPyPI (runs post_deploy hook)."""
-    from pathlib import Path as _Path
-    root = _Path(project_dir).resolve() if project_dir else _cwd()
+    """🚀 Upload dist/* to PyPI or TestPyPI.
+
+    Use --venv or --python to target the same interpreter used during build,
+    ensuring twine is looked up in the correct environment.
+
+    Examples:
+        pipndeploy build --venv && pipndeploy deploy --venv
+        pipndeploy deploy --python .venv/Scripts/python.exe
+    """
     try:
-        result = core_logic.upload_to_pypi(use_testpypi=testpypi, dry_run=dry_run, project_root=root)
+        root = core_logic.resolve_project_root(project_dir)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    # Resolve interpreter — explicit path beats --venv beats sys.executable
+    from pathlib import Path as _Path
+    if python_path:
+        py: str | None = str(_Path(python_path).resolve())
+    elif use_venv:
+        venv_py = root / ".venv" / ("Scripts/python.exe" if __import__("os").name == "nt" else "bin/python")
+        if not venv_py.exists():
+            typer.secho(f"❌ No .venv found at {root / '.venv'}. Run: pipndeploy create-venv", fg=typer.colors.RED)
+            raise typer.Exit(1)
+        py = str(venv_py)
+    else:
+        py = None   # upload_to_pypi defaults to sys.executable
+
+    try:
+        result = core_logic.upload_to_pypi(
+            use_testpypi=testpypi, dry_run=dry_run, project_root=root, python=py,
+        )
         if result:
             typer.echo(result)
     except RuntimeError as exc:
@@ -164,8 +205,11 @@ def clean(
     project_dir: str  = typer.Option("", "--project-dir", "-d", help="Project directory (default: cwd)"),
 ) -> None:
     """🧹 Remove build artifacts. Use --uninstall to also remove the package."""
-    from pathlib import Path as _Path
-    root = _Path(project_dir).resolve() if project_dir else _cwd()
+    try:
+        root = core_logic.resolve_project_root(project_dir)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(1)
     core_logic.clean_project(
         uninstall=uninstall,
         purge_pyc=purge_pyc,
@@ -201,8 +245,11 @@ def bump(
     project_dir: str = typer.Option("", "--project-dir", "-d", help="Project directory (default: cwd)"),
 ) -> None:
     """🔢 Bump the version in pyproject.toml (patch / minor / major)."""
-    from pathlib import Path as _Path
-    root = _Path(project_dir).resolve() if project_dir else _cwd()
+    try:
+        root = core_logic.resolve_project_root(project_dir)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(1)
     try:
         old_v, new_v = core_logic.bump_version(
             part=part,
@@ -211,6 +258,51 @@ def bump(
         )
         typer.secho(f"✅ {old_v} → {new_v}", fg=typer.colors.GREEN)
     except (FileNotFoundError, ValueError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+
+@app.command("auth-gen")
+def auth_gen(
+    pypi_token:     str  = typer.Option("", "--pypi",     help="PyPI API token", prompt=False),
+    testpypi_token: str  = typer.Option("", "--testpypi", help="TestPyPI API token", prompt=False),
+    overwrite:      bool = typer.Option(False, "--overwrite", help="Overwrite existing ~/.pypirc"),
+) -> None:
+    """🔑 Generate ~/.pypirc from API tokens.
+
+    Pass at least one token. Prompts interactively if neither is provided.
+
+    Examples:
+        pipndeploy auth-gen --pypi pypi-abc123
+        pipndeploy auth-gen --pypi pypi-abc --testpypi pypi-def --overwrite
+    """
+    if not pypi_token and not testpypi_token:
+        pypi_token     = typer.prompt("PyPI API token (leave blank to skip)",     default="")
+        testpypi_token = typer.prompt("TestPyPI API token (leave blank to skip)", default="")
+
+    if not pypi_token and not testpypi_token:
+        typer.secho("❌ At least one token is required.", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    from pathlib import Path as _Path
+    pypirc = _Path.home() / ".pypirc"
+    if pypirc.exists() and not overwrite:
+        typer.secho(
+            f"⚠️  ~/.pypirc already exists at {pypirc}\n"
+            "Use --overwrite to replace it (a backup will be saved automatically).",
+            fg=typer.colors.YELLOW,
+        )
+        raise typer.Exit(1)
+
+    try:
+        out = core_logic.generate_pypirc(
+            pypi_token=pypi_token,
+            testpypi_token=testpypi_token,
+            overwrite=overwrite,
+            backup=True,
+        )
+        typer.secho(f"✅ .pypirc written to {out}", fg=typer.colors.GREEN)
+    except (ValueError, OSError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
         raise typer.Exit(1)
 
@@ -235,7 +327,7 @@ def full_pipeline() -> None:
     author      = typer.prompt("Author name")
     email       = typer.prompt("Author email")
     license_txt = typer.prompt("Licence", default="MIT")
-    homepage    = typer.prompt("Homepage URL", default="https://github.com/yourusername/your-package")
+    homepage    = typer.prompt("Homepage URL (optional, press Enter to skip)", default="", show_default=False)
     kw_raw      = typer.prompt("Keywords (comma-separated)", default="")
     auto_deps   = typer.confirm("Auto-detect dependencies?", default=True)
 
@@ -253,8 +345,12 @@ def full_pipeline() -> None:
         if not typer.confirm("Continue anyway?", default=False):
             raise typer.Exit(0)
 
-    kw_list = [k.strip() for k in kw_raw.split(",") if k.strip()]
-    root = _cwd()
+    kw_list     = [k.strip() for k in kw_raw.split(",") if k.strip()]
+    gen_package = typer.confirm(
+        "Create package skeleton? (module/__init__.py + module/main.py)",
+        default=False,
+    )
+    root = core_logic.resolve_project_root("")
     deps = core_logic.detect_dependencies(root) if auto_deps else []
     typer.echo(f"📦 Dependencies: {', '.join(deps) or 'none'}")
 
@@ -266,6 +362,7 @@ def full_pipeline() -> None:
             # Empty string — let init_project_command derive the default safely.
             cli_script_value="",
             project_root=root,
+            gen_package=gen_package,
         )
     except ValueError as exc:
         typer.secho(str(exc), fg=typer.colors.RED)

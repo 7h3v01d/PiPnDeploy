@@ -338,7 +338,7 @@ def generate_pyproject(
     license_text: str = "MIT",
     keywords: list[str] | None = None,
     classifiers: list[str] | None = None,
-    homepage: str = "https://github.com/yourusername/your-package",
+    homepage: str = "",
     cli_script_value: str = "",
     project_root: Path | None = None,
 ) -> None:
@@ -377,7 +377,8 @@ def generate_pyproject(
             proj = doc["project"]
 
         # Scalar fields — tomlkit handles escaping automatically
-        proj["name"]        = name
+        # Normalise distribution name: lowercase, hyphens (PEP 625 / PyPI convention).
+        proj["name"]        = _distribution_name(name)
         proj["version"]     = version
         proj["description"] = description
         proj["license"]     = license_text   # replaces dict form too
@@ -397,13 +398,14 @@ def generate_pyproject(
             proj["classifiers"] = list(cls_list)
 
         # Homepage URL only — leave Repository, Bug Tracker, etc. untouched.
-        # If [project.urls] doesn't exist yet, create it with Homepage only.
-        if "urls" not in proj:
-            urls_tbl = tomlkit.table()
-            urls_tbl.add("Homepage", homepage)
-            proj.add("urls", urls_tbl)
-        else:
-            proj["urls"]["Homepage"] = homepage
+        # Only write/update when the user actually provided a URL.
+        if homepage:
+            if "urls" not in proj:
+                urls_tbl = tomlkit.table()
+                urls_tbl.add("Homepage", homepage)
+                proj.add("urls", urls_tbl)
+            else:
+                proj["urls"]["Homepage"] = homepage
 
         toml_path.write_text(tomlkit.dumps(doc), encoding="utf-8")
         log.info("✅ Surgically updated pyproject.toml (license: %s)", license_text)
@@ -414,7 +416,8 @@ def generate_pyproject(
 
         # [project]
         proj = tomlkit.table()
-        proj.add("name",           name)
+        # Normalise distribution name: lowercase, hyphens (PEP 625 / PyPI convention).
+        proj.add("name",           _distribution_name(name))
         proj.add("version",        version)
         proj.add("description",    description)
         proj.add("readme",         "README.md")
@@ -443,13 +446,15 @@ def generate_pyproject(
 
         doc.add("project", proj)
 
-        # [project.urls]
-        urls = tomlkit.table()
-        urls.add("Homepage",   homepage)
-        urls.add("Repository", homepage)
-        urls.add("Issues",     f"{homepage}/issues")
-        doc.add(tomlkit.nl())
-        doc["project"].add("urls", urls)
+        # [project.urls] — only written when the user provided a homepage URL.
+        # Omitting it avoids injecting placeholder URLs into new projects.
+        if homepage:
+            urls = tomlkit.table()
+            urls.add("Homepage",   homepage)
+            urls.add("Repository", homepage)
+            urls.add("Issues",     f"{homepage}/issues")
+            doc.add(tomlkit.nl())
+            doc["project"].add("urls", urls)
 
         # [project.scripts]
         # Distribution name uses hyphens (PyPI convention).
@@ -550,54 +555,82 @@ def create_gitignore(project_root: Path | None = None) -> None:
         log.info("🔎 .gitignore already exists — skipping.")
 
 
+# SPDX id → badge label + colour + OSI URL for the README licence badge.
+_LICENSE_BADGES: dict[str, tuple[str, str, str]] = {
+    "MIT":                        ("MIT",        "yellow",     "https://opensource.org/licenses/MIT"),
+    "Apache-2.0":                 ("Apache%202.0","blue",      "https://opensource.org/licenses/Apache-2.0"),
+    "GPL-3.0":                    ("GPL%20v3",   "blue",       "https://www.gnu.org/licenses/gpl-3.0"),
+    "LGPL-3.0":                   ("LGPL%20v3",  "blue",       "https://www.gnu.org/licenses/lgpl-3.0"),
+    "BSD-3-Clause":               ("BSD%203--Clause","blue",   "https://opensource.org/licenses/BSD-3-Clause"),
+    "BSD-2-Clause":               ("BSD%202--Clause","blue",   "https://opensource.org/licenses/BSD-2-Clause"),
+    "Mozilla Public License 2.0": ("MPL%202.0",  "brightgreen","https://opensource.org/licenses/MPL-2.0"),
+    "ISC":                        ("ISC",        "blue",       "https://opensource.org/licenses/ISC"),
+    "The Unlicense":              ("Unlicense",  "blue",       "https://unlicense.org/"),
+}
+
+
 def create_readme(
     project_root: Path | None = None,
     name: str = "",
     description: str = "",
+    license_text: str = "MIT",
+    homepage: str = "",
 ) -> None:
-    """Write a README.md with badges if one does not already exist."""
-    root = project_root or Path.cwd()
-    readme = root / "README.md"
-    if not readme.exists():
-        pkg = name or root.name
-        desc = description or "A Python package."
-        slug = pkg.lower().replace("_", "-")
-        content = f"""# {pkg}
+    """Write a README.md with correct badges if one does not already exist.
 
-{desc}
-
-[![PyPI version](https://badge.fury.io/py/{slug}.svg)](https://pypi.org/project/{slug}/)
-[![Python versions](https://img.shields.io/pypi/pyversions/{slug}.svg)](https://pypi.org/project/{slug}/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
-## Installation
-
-```bash
-pip install {slug}
-```
-
-## Usage
-
-```python
-import {pkg.replace("-", "_")}
-```
-
-## Development
-
-```bash
-git clone <your-repo-url>
-cd {slug}
-pip install -e .
-```
-
-## License
-
-MIT
-"""
-        readme.write_text(content, encoding="utf-8")
-        log.info("✅ Created README.md")
-    else:
+    Uses the normalised distribution name (slug), module name (underscores),
+    actual license identifier, and homepage from the caller — not hardcoded values.
+    """
+    root    = project_root or Path.cwd()
+    readme  = root / "README.md"
+    if readme.exists():
         log.info("🔎 README.md already exists — skipping.")
+        return
+
+    # Normalise names using the same helpers as generate_pyproject
+    raw_name    = name or root.name
+    slug        = _distribution_name(raw_name)   # my-package  (PyPI/URL)
+    module      = _module_name(raw_name)          # my_package  (Python import)
+    desc        = description or "A Python package."
+    repo_url    = homepage  # empty string → git clone line omitted
+
+    # Build the licence badge — fall back gracefully for unlisted licences
+    if license_text in _LICENSE_BADGES:
+        lic_label, lic_colour, lic_url = _LICENSE_BADGES[license_text]
+    else:
+        lic_label  = license_text.replace(" ", "%20")
+        lic_colour = "lightgrey"
+        lic_url    = "https://opensource.org/licenses/"
+
+    dev_section = (
+        f"## Development\n\n"
+        f"```bash\n"
+        f"git clone {repo_url}\n"
+        f"cd {slug}\n"
+        f"pip install -e .\n"
+        f"```\n\n"
+    ) if repo_url else ""
+
+    content = (
+        f"# {slug}\n\n"
+        f"{desc}\n\n"
+        f"[![PyPI version](https://badge.fury.io/py/{slug}.svg)](https://pypi.org/project/{slug}/)\n"
+        f"[![Python versions](https://img.shields.io/pypi/pyversions/{slug}.svg)](https://pypi.org/project/{slug}/)\n"
+        f"[![License: {license_text}](https://img.shields.io/badge/License-{lic_label}-{lic_colour}.svg)]({lic_url})\n\n"
+        f"## Installation\n\n"
+        f"```bash\n"
+        f"pip install {slug}\n"
+        f"```\n\n"
+        f"## Usage\n\n"
+        f"```python\n"
+        f"import {module}\n"
+        f"```\n\n"
+        f"{dev_section}"
+        f"## License\n\n"
+        f"{license_text}\n"
+    )
+    readme.write_text(content, encoding="utf-8")
+    log.info("✅ Created README.md")
 
 
 # ─── pyproject.toml reading ───────────────────────────────────────────────────
@@ -645,20 +678,33 @@ def get_package_name_from_pyproject(project_root: Path | None = None) -> str:
 
 # ─── Build / deploy / clean ──────────────────────────────────────────────────
 
-def run_hook(hook_name: str, project_root: Path | None = None) -> bool:
+def run_hook(
+    hook_name: str,
+    project_root: Path | None = None,
+    python: str | None = None,
+) -> bool:
     """Run a lifecycle hook script if it exists.
+
+    Args:
+        hook_name:    Name of the hook (e.g. "pre_build", "post_deploy").
+        project_root: Project directory containing the hooks/ folder.
+        python:       Interpreter to run the hook with. Pass the same
+                      interpreter used for building so hooks can import
+                      project-local dev tools installed in .venv.
+                      Defaults to sys.executable.
 
     Returns True if the hook ran successfully or did not exist.
     Returns False (and logs an error) if the hook script exited non-zero.
     Unlike the old behaviour, failures are never silently swallowed.
     """
     root = project_root or Path.cwd()
+    py   = python or sys.executable
     hook = root / "hooks" / f"{hook_name}.py"
     if not hook.exists():
         return True
-    log.info("🔁 Running hook: %s", hook.name)
+    log.info("🔁 Running hook: %s (interpreter: %s)", hook.name, py)
     result = subprocess.run(
-        [sys.executable, str(hook)],
+        [py, str(hook)],
         cwd=root,
         capture_output=False,
     )
@@ -696,26 +742,40 @@ def _tool_is_available(python: str, tool: str) -> bool:
     return result.returncode == 0
 
 
-def install_build_tools(python: str | None = None) -> None:
-    """Ensure build and twine are available without silently mutating the env.
+def _ensure_tool(tool: str, python: str) -> None:
+    """Install *tool* via pip into *python* if it is not already available."""
+    if _tool_is_available(python, tool):
+        log.debug("🔎 %s already present — skipping install.", tool)
+        return
+    log.info("📦 Installing missing tool: %s", tool)
+    subprocess.run([python, "-m", "pip", "install", tool], check=True)
 
-    Strategy:
-      - If both tools are already present, do nothing.
-      - If either is missing, install only the missing ones.
-      - Log clearly so the user knows what happened.
-    Avoids running `pip install --upgrade` unconditionally on every build,
-    which would silently mutate the user's active Python environment.
+
+def ensure_build_tool(python: str | None = None) -> None:
+    """Ensure the ``build`` package is available for the given interpreter.
+
+    Called by ``build_package()`` only — does not install twine unnecessarily.
+    """
+    _ensure_tool("build", python or sys.executable)
+
+
+def ensure_twine_tool(python: str | None = None) -> None:
+    """Ensure ``twine`` is available for the given interpreter.
+
+    Called by ``upload_to_pypi()`` only — does not install build unnecessarily.
+    """
+    _ensure_tool("twine", python or sys.executable)
+
+
+def install_build_tools(python: str | None = None) -> None:
+    """Ensure both build and twine are available.
+
+    Kept for backward compatibility. Prefer ``ensure_build_tool()`` and
+    ``ensure_twine_tool()`` in new code so each step installs only what it needs.
     """
     py = python or sys.executable
-    missing = [t for t in ("build", "twine") if not _tool_is_available(py, t)]
-    if not missing:
-        log.debug("🔎 build tools already present — skipping install.")
-        return
-    log.info("📦 Installing missing build tools: %s", ", ".join(missing))
-    subprocess.run(
-        [py, "-m", "pip", "install"] + missing,
-        check=True,
-    )
+    ensure_build_tool(py)
+    ensure_twine_tool(py)
 
 
 def build_package(
@@ -735,16 +795,17 @@ def build_package(
         python: Explicit interpreter path. Overrides use_venv when provided.
     """
     root = project_root or Path.cwd()
-    if not run_hook("pre_build", root):
-        raise RuntimeError("❌ pre_build hook failed — aborting build.")
-    log.info("📦 Building package…")
+    # Resolve interpreter before running the hook so both steps use the same env.
     if python:
         py = python
     elif use_venv:
         py = str(_venv_python(root))
     else:
         py = sys.executable
-    install_build_tools(py)
+    if not run_hook("pre_build", root, python=py):
+        raise RuntimeError("❌ pre_build hook failed — aborting build.")
+    log.info("📦 Building package…")
+    ensure_build_tool(py)   # only build is needed here; twine is for upload
     subprocess.run([py, "-m", "build"], check=True, cwd=root)
     log.info("📦 Build complete (interpreter: %s)", py)
     return py
@@ -785,6 +846,7 @@ def upload_to_pypi(
     if not ok:
         raise RuntimeError(err_msg)
 
+    ensure_twine_tool(py)   # only twine is needed here; build is for build_package
     repo_args = ["--repository", "testpypi"] if use_testpypi else []
     log.info("🚀 Uploading to %s (interpreter: %s)…", target, py)
     subprocess.run(
@@ -795,8 +857,9 @@ def upload_to_pypi(
     )
     log.info("✅ Upload to %s complete.", target)
 
-    # post_deploy runs only after a confirmed successful upload
-    if not run_hook("post_deploy", root):
+    # post_deploy runs only after a confirmed successful upload,
+    # using the same interpreter as the build step.
+    if not run_hook("post_deploy", root, python=py):
         log.warning("⚠️  post_deploy hook failed — upload succeeded but hook did not.")
 
     return None
@@ -805,16 +868,19 @@ def upload_to_pypi(
 def _purge_pyc(root: Path) -> None:
     """Recursively remove __pycache__ dirs and .pyc files under *root*.
 
-    Directories in ``_CLEAN_EXCLUDE_DIRS`` (virtual environments, VCS
-    internals, node_modules) are skipped entirely so clean never mutates
-    tooling that lives outside the project's own source tree.
+    Skips:
+    - Directories in ``_CLEAN_EXCLUDE_DIRS`` (virtual environments, VCS internals).
+    - Any dot-directory (e.g. ``.mypy_cache``, ``.tox``) — these are always
+      managed by external tools and must not be mutated by clean.
     """
     for item in root.iterdir():
-        if item.name in _CLEAN_EXCLUDE_DIRS or item.name.startswith("."):
-            # Skip dot-directories not in the explicit set too (e.g. .mypy_cache)
-            if item.name in _CLEAN_EXCLUDE_DIRS:
-                log.debug("🔎 Skipping excluded dir during purge: %s", item.name)
-                continue
+        if not item.is_dir() and not (item.is_file() and item.suffix == ".pyc"):
+            continue
+        if item.is_dir() and (
+            item.name in _CLEAN_EXCLUDE_DIRS or item.name.startswith(".")
+        ):
+            log.debug("🔎 Skipping excluded dir during purge: %s", item.name)
+            continue
         if item.is_dir():
             if item.name == "__pycache__":
                 shutil.rmtree(item)
@@ -1049,6 +1115,170 @@ def bump_version(
     log.info("✅ Version bumped: %s → %s", current, new_version)
     return current, new_version
 
+# ─── Package skeleton creation ───────────────────────────────────────────────
+
+def create_package_skeleton(
+    name: str,
+    project_root: Path | None = None,
+) -> bool:
+    """Create a minimal importable package skeleton if it does not already exist.
+
+    Creates:
+        <project_root>/<module_name>/__init__.py
+        <project_root>/<module_name>/main.py
+
+    Returns True if files were created, False if the package already existed.
+    This means ``pipndeploy init`` can be used on both brand-new projects
+    (where it creates the scaffold) and existing projects (where it only
+    generates packaging metadata).
+    """
+    root   = project_root or Path.cwd()
+    module = _module_name(name)
+    pkg    = root / module
+
+    dist = _distribution_name(name)
+
+    if pkg.exists():
+        # Folder exists — check whether it is complete.
+        # Create any missing files without touching existing ones.
+        created_any = False
+        if not (pkg / "__init__.py").exists():
+            (pkg / "__init__.py").write_text(
+                f'''"""Top-level package for {dist}."""\n''',
+                encoding="utf-8",
+            )
+            log.info("✅ Created missing %s/__init__.py", module)
+            created_any = True
+        if not (pkg / "main.py").exists():
+            (pkg / "main.py").write_text(
+                f'''"""Entry point for {dist}."""\n\n\ndef main() -> None:\n    print("Hello from {dist}")\n\n\nif __name__ == "__main__":\n    main()\n''',
+                encoding="utf-8",
+            )
+            log.info("✅ Created missing %s/main.py", module)
+            created_any = True
+        if not created_any:
+            log.info("🔎 Package folder %s/ already complete — skipping.", module)
+        return created_any
+
+    pkg.mkdir(parents=True)
+
+    (pkg / "__init__.py").write_text(
+        f'''"""Top-level package for {dist}."""\n''',
+        encoding="utf-8",
+    )
+
+    (pkg / "main.py").write_text(
+        f'''"""Entry point for {dist}."""\n\n\ndef main() -> None:\n    print("Hello from {dist}")\n\n\nif __name__ == "__main__":\n    main()\n''',
+        encoding="utf-8",
+    )
+
+    log.info("✅ Created package skeleton: %s/__init__.py + %s/main.py", module, module)
+    return True
+
+
+# ─── Project root resolver ───────────────────────────────────────────────────
+
+def resolve_project_root(project_dir: str = "") -> Path:
+    """Resolve and validate a project directory path.
+
+    Args:
+        project_dir: String path from CLI ``--project-dir`` option.
+                     Empty string means "use the current working directory".
+
+    Returns the resolved, validated Path.
+
+    Raises:
+        FileNotFoundError:  The path does not exist.
+        NotADirectoryError: The path exists but is not a directory.
+    """
+    root = Path(project_dir).resolve() if project_dir else Path.cwd()
+    if not root.exists():
+        raise FileNotFoundError(
+            f"❌ Project directory does not exist: {root}"
+        )
+    if not root.is_dir():
+        raise NotADirectoryError(
+            f"❌ Project path is not a directory: {root}"
+        )
+    return root
+
+
+# ─── .pypirc generation ──────────────────────────────────────────────────────
+
+def generate_pypirc(
+    pypi_token: str = "",
+    testpypi_token: str = "",
+    overwrite: bool = False,
+    backup: bool = True,
+) -> Path:
+    """Write a ``~/.pypirc`` file with the supplied API tokens.
+
+    Args:
+        pypi_token:     PyPI API token (starts with ``pypi-``). Omitted if empty.
+        testpypi_token: TestPyPI API token. Omitted if empty.
+        overwrite:      If False (default) and ``~/.pypirc`` already exists,
+                        raises ``FileExistsError`` instead of overwriting.
+        backup:         If True (default) and an existing file is being overwritten,
+                        a backup is saved as ``~/.pypirc.bak`` first.
+
+    Returns the Path to the written file.
+
+    Raises:
+        ValueError:      Neither token was supplied.
+        FileExistsError: ``~/.pypirc`` exists and ``overwrite=False``.
+    """
+    if not pypi_token and not testpypi_token:
+        raise ValueError("❌ At least one API token (pypi or testpypi) is required.")
+
+    pypirc = Path.home() / ".pypirc"
+
+    if pypirc.exists() and not overwrite:
+        raise FileExistsError(
+            f"❌ ~/.pypirc already exists at {pypirc}. "
+            "Pass overwrite=True to replace it (a backup will be saved automatically)."
+        )
+
+    if pypirc.exists() and backup:
+        bak = pypirc.with_name(".pypirc.bak")
+        shutil.copy2(pypirc, bak)
+        log.info("🔎 Backed up existing .pypirc → %s", bak)
+
+    # Only list servers that actually have a token
+    servers: list[str] = []
+    if pypi_token:
+        servers.append("pypi")
+    if testpypi_token:
+        servers.append("testpypi")
+
+    config = configparser.ConfigParser()
+    config["distutils"] = {"index-servers": "\n    " + "\n    ".join(servers)}
+
+    if pypi_token:
+        config["pypi"] = {
+            "repository": "https://upload.pypi.org/legacy/",
+            "username":   "__token__",
+            "password":   pypi_token,
+        }
+    if testpypi_token:
+        config["testpypi"] = {
+            "repository": "https://test.pypi.org/legacy/",
+            "username":   "__token__",
+            "password":   testpypi_token,
+        }
+
+    with open(pypirc, "w") as fh:
+        config.write(fh)
+
+    # Restrict permissions on Unix-like systems
+    if os.name != "nt":
+        os.chmod(pypirc, 0o600)
+        log.info("🔎 Set .pypirc permissions to 600 (owner read/write only).")
+
+    log.info("✅ .pypirc generated at %s", pypirc)
+    log.warning("⚠️  API tokens are stored in plaintext. Keep this file private.")
+    return pypirc
+
+
 # ─── High-level command wrappers (used by GUI + CLI) ─────────────────────────
 # These are the only symbols the GUI and CLI need to import.
 
@@ -1062,11 +1292,21 @@ def init_project_command(
     license_text: str = "MIT",
     keywords: list[str] | None = None,
     classifiers: list[str] | None = None,
-    homepage: str = "https://github.com/yourusername/your-package",
+    homepage: str = "",
     cli_script_value: str = "",
     project_root: Path | None = None,
     gen_gitignore: bool = True,
+    gen_package: bool = False,
 ) -> list[str]:
+    """Initialise packaging metadata for a Python project.
+
+    Args:
+        gen_package: If True, create a minimal package skeleton
+                     (<module>/__init__.py + <module>/main.py) when it does
+                     not already exist. Safe to pass True for both new and
+                     existing projects — skeleton creation is skipped if the
+                     package folder already exists.
+    """
     if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
         raise ValueError("❌ Invalid email format.")
 
@@ -1077,7 +1317,11 @@ def init_project_command(
     if err:
         raise ValueError(f"❌ {err}")
     cli_script_value = ep
-    create_readme(project_root, name=name, description=description)
+
+    if gen_package:
+        create_package_skeleton(name, project_root)
+    create_readme(project_root, name=name, description=description,
+                 license_text=license_text, homepage=homepage)
     if gen_gitignore:
         create_gitignore(project_root)
     generate_pyproject(
@@ -1127,22 +1371,27 @@ def run_full_pipeline(
     license_text: str = "MIT",
     keywords: list[str] | None = None,
     classifiers: list[str] | None = None,
-    homepage: str = "https://github.com/yourusername/your-package",
+    homepage: str = "",
     cli_script_value: str = "",
     project_root: Path | None = None,
+    gen_package: bool = False,
 ) -> str | None:
-    if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
-        raise ValueError("❌ Invalid email format.")
+    """Run the full init → build → deploy pipeline.
+
+    Delegates init to ``init_project_command()`` so the CLI, GUI, and
+    programmatic API all share the same logic rather than duplicating it here.
+    """
     taken_pypi, _ = check_name_availability(name)
     if taken_pypi:
         raise ValueError(f"❌ Package name '{name}' is already taken on PyPI.")
     deps = detect_dependencies(project_root) if auto_deps else []
-    create_readme(project_root, name=name, description=description)
-    create_gitignore(project_root)
-    generate_pyproject(
-        name, version, description, author, email, deps,
-        license_text, keywords, classifiers, homepage, cli_script_value,
+    init_project_command(
+        name=name, version=version, description=description,
+        author=author, email=email, dependencies=deps,
+        license_text=license_text, keywords=keywords, classifiers=classifiers,
+        homepage=homepage, cli_script_value=cli_script_value,
         project_root=project_root,
+        gen_gitignore=True, gen_package=gen_package,
     )
     create_virtualenv(project_root)
     py = build_package(use_venv=True, project_root=project_root)
